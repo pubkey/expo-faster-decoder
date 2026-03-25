@@ -31,21 +31,20 @@ class ExpoTextDecoderModule : Module() {
      * @return The decoded string.
      */
     Function("decodeUTF8") { data: ByteArray, fatal: Boolean ->
+      val decoder: CharsetDecoder = Charsets.UTF_8.newDecoder()
       if (fatal) {
-        val decoder: CharsetDecoder = Charsets.UTF_8.newDecoder()
-          .onMalformedInput(CodingErrorAction.REPORT)
+        decoder.onMalformedInput(CodingErrorAction.REPORT)
           .onUnmappableCharacter(CodingErrorAction.REPORT)
         try {
-          decoder.decode(ByteBuffer.wrap(data)).toString()
+          return@Function decoder.decode(ByteBuffer.wrap(data)).toString()
         } catch (e: java.nio.charset.MalformedInputException) {
           throw InvalidUTF8Exception()
         }
       } else {
-        val decoder: CharsetDecoder = Charsets.UTF_8.newDecoder()
-          .onMalformedInput(CodingErrorAction.REPLACE)
+        decoder.onMalformedInput(CodingErrorAction.REPLACE)
           .onUnmappableCharacter(CodingErrorAction.REPLACE)
           .replaceWith("\uFFFD")
-        decoder.decode(ByteBuffer.wrap(data)).toString()
+        return@Function decoder.decode(ByteBuffer.wrap(data)).toString()
       }
     }
   }
