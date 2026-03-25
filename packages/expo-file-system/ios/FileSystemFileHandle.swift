@@ -7,32 +7,18 @@ internal final class FileSystemFileHandle: SharedRef<FileHandle> {
   let handle: FileHandle
   private var cachedFileSize: UInt64
 
-  init(file: FileSystemFile, mode: String? = nil) throws {
+  init(file: FileSystemFile) throws {
     self.file = file
-    switch mode {
-    case "r":
-      handle = try FileHandle(forReadingFrom: file.url)
-    case "w", "wa", "wt":
-      handle = try FileHandle(forWritingTo: file.url)
-    default:
-      handle = try FileHandle(forUpdating: file.url)
-    }
+    handle = try FileHandle(forUpdating: file.url)
 
     // Cache the file size on open to avoid repeated seek-to-end operations.
-    // This saves 3 syscalls per size access (offset, seekToEnd, seekBack).
+    // Each uncached size access required 3 syscalls: offset() → seekToEnd() → seek(back).
     do {
       cachedFileSize = try handle.seekToEnd()
       handle.seek(toFileOffset: 0)
     } catch {
       cachedFileSize = 0
       handle.seek(toFileOffset: 0)
-    }
-
-    if mode == "wt" {
-      try handle.truncate(atOffset: 0)
-      cachedFileSize = 0
-    } else if mode == "wa" {
-      handle.seek(toFileOffset: cachedFileSize)
     }
 
     super.init(handle)
@@ -47,11 +33,6 @@ internal final class FileSystemFileHandle: SharedRef<FileHandle> {
     }
   }
 
-  func readAt(_ offset: UInt64, _ length: Int) throws -> Data {
-    handle.seek(toFileOffset: offset)
-    return try read(length)
-  }
-
   func write(_ bytes: Data) throws {
     let currentOffset = (try? handle.offset()) ?? 0
     try handle.write(contentsOf: bytes)
@@ -59,11 +40,6 @@ internal final class FileSystemFileHandle: SharedRef<FileHandle> {
     if newOffset > cachedFileSize {
       cachedFileSize = newOffset
     }
-  }
-
-  func writeAt(_ offset: UInt64, _ bytes: Data) throws {
-    handle.seek(toFileOffset: offset)
-    try write(bytes)
   }
 
   func close() throws {

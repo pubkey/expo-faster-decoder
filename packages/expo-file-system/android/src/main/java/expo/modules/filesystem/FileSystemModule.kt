@@ -266,14 +266,8 @@ class FileSystemModule : Module() {
       Function("readBytes") { fileHandle: FileSystemFileHandle, bytes: Long ->
         fileHandle.read(bytes)
       }
-      Function("readBytesAt") { fileHandle: FileSystemFileHandle, offset: Long, bytes: Long ->
-        fileHandle.readAt(offset, bytes)
-      }
       Function("writeBytes") { fileHandle: FileSystemFileHandle, data: ByteArray ->
         fileHandle.write(data)
-      }
-      Function("writeBytesAt") { fileHandle: FileSystemFileHandle, offset: Long, data: ByteArray ->
-        fileHandle.writeAt(offset, data)
       }
       Function("close") { fileHandle: FileSystemFileHandle ->
         fileHandle.close()

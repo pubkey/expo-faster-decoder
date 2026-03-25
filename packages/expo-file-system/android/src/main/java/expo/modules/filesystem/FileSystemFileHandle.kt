@@ -136,11 +136,6 @@ class FileSystemFileHandle private constructor(
     }
   }
 
-  fun readAt(readOffset: Long, length: Long): ByteArray {
-    fileChannel.position(readOffset)
-    return read(length)
-  }
-
   fun write(data: ByteArray) {
     ensureIsOpen()
     mode.ensureCanWrite()
@@ -158,11 +153,6 @@ class FileSystemFileHandle private constructor(
     } catch (e: Exception) {
       throw UnableToWriteHandleException(e.message ?: "unknown error")
     }
-  }
-
-  fun writeAt(writeOffset: Long, data: ByteArray) {
-    fileChannel.position(writeOffset)
-    write(data)
   }
 
   var offset: Long?
