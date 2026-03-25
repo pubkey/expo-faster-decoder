@@ -61,19 +61,23 @@ const FINISHED = -1;
  * @param {!(number[]|Uint8Array)} tokens Array of tokens that provide the stream.
  */
 class Stream {
-  private tokens: number[];
+  private data: Uint8Array;
+  private pos: number;
+  private prepended: number[] | null;
 
-  constructor(tokens: number[] | Uint8Array) {
-    this.tokens = Array.prototype.slice.call(tokens);
-    // Reversed as push/pop is more efficient than shift/unshift.
-    this.tokens.reverse();
+  constructor(data: Uint8Array) {
+    this.data = data;
+    this.pos = 0;
+    this.prepended = null;
   }
 
   /**
    * @return {boolean} True if end-of-stream has been hit.
    */
   endOfStream(): boolean {
-    return !this.tokens.length;
+    return (
+      (this.prepended === null || this.prepended.length === 0) && this.pos >= this.data.length
+    );
   }
 
   /**
@@ -85,8 +89,11 @@ class Stream {
    * end_of_stream.
    */
   read(): number {
-    if (!this.tokens.length) return END_OF_STREAM;
-    return this.tokens.pop()!;
+    if (this.prepended !== null && this.prepended.length > 0) {
+      return this.prepended.pop()!;
+    }
+    if (this.pos >= this.data.length) return END_OF_STREAM;
+    return this.data[this.pos++];
   }
 
   /**
@@ -97,25 +104,16 @@ class Stream {
    * @param token The token(s) to prepend to the stream.
    */
   prepend(token: number | number[]): void {
-    if (Array.isArray(token)) {
-      while (token.length) this.tokens.push(token.pop()!);
-    } else {
-      this.tokens.push(token);
+    if (this.prepended === null) {
+      this.prepended = [];
     }
-  }
-
-  /**
-   * When one or more tokens are pushed to a stream, those tokens
-   * must be inserted, in given order, after the last token in the
-   * stream.
-   *
-   * @param token The tokens(s) to push to the stream.
-   */
-  push(token: number | number[]): void {
     if (Array.isArray(token)) {
-      while (token.length) this.tokens.unshift(token.shift()!);
+      // Push in reverse order so pop() returns them in the original order
+      for (let i = token.length - 1; i >= 0; i--) {
+        this.prepended.push(token[i]);
+      }
     } else {
-      this.tokens.unshift(token);
+      this.prepended.push(token);
     }
   }
 }
@@ -375,6 +373,26 @@ export class TextDecoder {
     // 2. If options's stream is true, set the do not flush flag, and
     // unset the do not flush flag otherwise.
     this._doNotFlush = Boolean(options['stream']);
+
+    // Fast path: pure ASCII input in non-streaming mode.
+    // ASCII bytes are all < 0x80 and can be converted directly without
+    // the byte-by-byte UTF-8 decoder. BOM handling is not needed because
+    // UTF-8 BOM bytes (0xEF 0xBB 0xBF) are all >= 0x80.
+    const len = bytes.length;
+    if (len > 0 && !this._doNotFlush) {
+      let allAscii = true;
+      for (let i = 0; i < len; i++) {
+        if (bytes[i] >= 0x80) {
+          allAscii = false;
+          break;
+        }
+      }
+      if (allAscii) {
+        this._decoder = null;
+        this._BOMseen = true;
+        return String.fromCharCode.apply(null, bytes as unknown as number[]);
+      }
+    }
 
     // 3. If input is given, push a copy of input to stream.
     // TODO: Align with spec algorithm - maintain stream on instance.
