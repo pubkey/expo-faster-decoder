@@ -141,12 +141,13 @@ class FileSystemFileHandle private constructor(
     mode.ensureCanWrite()
 
     try {
-      val positionBefore = fileChannel.position()
       val buffer = ByteBuffer.wrap(data)
       while (buffer.hasRemaining()) {
         fileChannel.write(buffer)
       }
-      val newPosition = positionBefore + data.size
+      // Update cached size if the write extended the file.
+      // position() is called within the try-catch so failures are handled.
+      val newPosition = fileChannel.position()
       if (newPosition > cachedFileSize) {
         cachedFileSize = newPosition
       }

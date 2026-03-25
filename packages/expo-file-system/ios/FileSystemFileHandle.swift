@@ -15,11 +15,10 @@ internal final class FileSystemFileHandle: SharedRef<FileHandle> {
     // Each uncached size access required 3 syscalls: offset() → seekToEnd() → seek(back).
     do {
       cachedFileSize = try handle.seekToEnd()
-      handle.seek(toFileOffset: 0)
     } catch {
       cachedFileSize = 0
-      handle.seek(toFileOffset: 0)
     }
+    handle.seek(toFileOffset: 0)
 
     super.init(handle)
   }
@@ -34,10 +33,9 @@ internal final class FileSystemFileHandle: SharedRef<FileHandle> {
   }
 
   func write(_ bytes: Data) throws {
-    let currentOffset = (try? handle.offset()) ?? 0
     try handle.write(contentsOf: bytes)
-    let newOffset = currentOffset + UInt64(bytes.count)
-    if newOffset > cachedFileSize {
+    // Update cached size if the write extended the file.
+    if let newOffset = try? handle.offset(), newOffset > cachedFileSize {
       cachedFileSize = newOffset
     }
   }
