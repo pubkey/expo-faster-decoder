@@ -4,75 +4,31 @@
 // https://github.com/inexorabletash/text-encoding/blob/3f330964c0e97e1ed344c2a3e963f4598610a7ad/lib/encoding.js#L1
 
 /**
- * End-of-stream is a special token that signifies no more tokens
- * are in the stream.
+ * Checks if a number is within a specified range.
+ * @param a The number to test.
+ * @param min The minimum value in the range, inclusive.
+ * @param max The maximum value in the range, inclusive.
+ * @returns `true` if a passed number is within the specified range.
  */
-const END_OF_STREAM = -1;
-
-const FINISHED = -1;
+function inRange(a: number, min: number, max: number): boolean {
+  return min <= a && a <= max;
+}
 
 /**
- * Maximum number of char codes to pass to String.fromCharCode.apply at once.
- */
-const STRING_CHUNK_SIZE = 8192;
-
-/**
- * Converts an array of code points to a string using batched String.fromCharCode.
+ * Converts an array of code points to a string.
  * @param codePoints Array of code points.
  * @returns The string representation of given array.
  */
 function codePointsToString(codePoints: number[]): string {
-  const len = codePoints.length;
-  if (len === 0) return '';
-
-  // Fast path: small arrays where all code points are BMP (U+0000..U+FFFF)
-  if (len <= STRING_CHUNK_SIZE) {
-    let allBMP = true;
-    for (let i = 0; i < len; i++) {
-      if (codePoints[i] > 0xffff) {
-        allBMP = false;
-        break;
-      }
-    }
-    if (allBMP) {
-      return String.fromCharCode.apply(null, codePoints);
-    }
-  }
-
-  // General path: handle supplementary plane characters with chunked conversion
   let s = '';
-  const chunk: number[] = [];
-  for (let i = 0; i < len; i++) {
-    const cp = codePoints[i];
+  for (let i = 0; i < codePoints.length; ++i) {
+    let cp = codePoints[i];
     if (cp <= 0xffff) {
-      chunk.push(cp);
+      s += String.fromCharCode(cp);
     } else {
-      const adjusted = cp - 0x10000;
-      chunk.push((adjusted >> 10) + 0xd800, (adjusted & 0x3ff) + 0xdc00);
+      cp -= 0x10000;
+      s += String.fromCharCode((cp >> 10) + 0xd800, (cp & 0x3ff) + 0xdc00);
     }
-    if (chunk.length >= STRING_CHUNK_SIZE) {
-      s += String.fromCharCode.apply(null, chunk);
-      chunk.length = 0;
-    }
-  }
-  if (chunk.length > 0) {
-    s += String.fromCharCode.apply(null, chunk);
-  }
-  return s;
-}
-
-/**
- * Convert a range of bytes known to be ASCII (< 0x80) directly to a string.
- */
-function asciiToString(bytes: Uint8Array, start: number, end: number): string {
-  const length = end - start;
-  if (length <= STRING_CHUNK_SIZE) {
-    return String.fromCharCode.apply(null, bytes.subarray(start, end) as unknown as number[]);
-  }
-  let s = '';
-  for (let i = start; i < end; i += STRING_CHUNK_SIZE) {
-    const chunkEnd = i + STRING_CHUNK_SIZE < end ? i + STRING_CHUNK_SIZE : end;
-    s += String.fromCharCode.apply(null, bytes.subarray(i, chunkEnd) as unknown as number[]);
   }
   return s;
 }
@@ -91,11 +47,18 @@ function normalizeBytes(input?: ArrayBuffer | DataView): Uint8Array {
 }
 
 /**
- * An index-based stream that reads directly from a Uint8Array without
- * copying or reversing. Supports prepend for the decoder's error recovery.
+ * End-of-stream is a special token that signifies no more tokens
+ * are in the stream.
+ */
+const END_OF_STREAM = -1;
+
+const FINISHED = -1;
+
+/**
+ * A stream represents an ordered sequence of tokens.
  *
  * @constructor
- * @param {Uint8Array} data The byte array to read from.
+ * @param {!(number[]|Uint8Array)} tokens Array of tokens that provide the stream.
  */
 class Stream {
   private data: Uint8Array;
@@ -245,14 +208,14 @@ class UTF8Decoder implements Decoder {
 
     // 3. If utf-8 bytes needed is 0, based on byte:
     if (this.utf8BytesNeeded === 0) {
-      // 0x00 to 0x7F — inline range check for performance
-      if (bite <= 0x7f) {
+      // 0x00 to 0x7F
+      if (inRange(bite, 0x00, 0x7f)) {
         // Return a code point whose value is byte.
         return bite;
       }
 
       // 0xC2 to 0xDF
-      else if (bite >= 0xc2 && bite <= 0xdf) {
+      else if (inRange(bite, 0xc2, 0xdf)) {
         // 1. Set utf-8 bytes needed to 1.
         this.utf8BytesNeeded = 1;
 
@@ -261,7 +224,7 @@ class UTF8Decoder implements Decoder {
       }
 
       // 0xE0 to 0xEF
-      else if (bite >= 0xe0 && bite <= 0xef) {
+      else if (inRange(bite, 0xe0, 0xef)) {
         // 1. If byte is 0xE0, set utf-8 lower boundary to 0xA0.
         if (bite === 0xe0) this.utf8LowerBoundary = 0xa0;
         // 2. If byte is 0xED, set utf-8 upper boundary to 0x9F.
@@ -273,7 +236,7 @@ class UTF8Decoder implements Decoder {
       }
 
       // 0xF0 to 0xF4
-      else if (bite >= 0xf0 && bite <= 0xf4) {
+      else if (inRange(bite, 0xf0, 0xf4)) {
         // 1. If byte is 0xF0, set utf-8 lower boundary to 0x90.
         if (bite === 0xf0) this.utf8LowerBoundary = 0x90;
         // 2. If byte is 0xF4, set utf-8 upper boundary to 0x8F.
@@ -296,7 +259,7 @@ class UTF8Decoder implements Decoder {
 
     // 4. If byte is not in the range utf-8 lower boundary to utf-8
     // upper boundary, inclusive, run these substeps:
-    if (bite < this.utf8LowerBoundary || bite > this.utf8UpperBoundary) {
+    if (!inRange(bite, this.utf8LowerBoundary, this.utf8UpperBoundary)) {
       // 1. Set utf-8 code point, utf-8 bytes needed, and utf-8
       // bytes seen to 0, set utf-8 lower boundary to 0x80, and set
       // utf-8 upper boundary to 0xBF.
@@ -411,11 +374,11 @@ export class TextDecoder {
     // unset the do not flush flag otherwise.
     this._doNotFlush = Boolean(options['stream']);
 
-    const len = bytes.length;
-
     // Fast path: pure ASCII input in non-streaming mode.
-    // Pure ASCII bytes are all < 0x80 and cannot contain a UTF-8 BOM
-    // (which is encoded as 0xEF 0xBB 0xBF), so BOM handling is not needed.
+    // ASCII bytes are all < 0x80 and can be converted directly without
+    // the byte-by-byte UTF-8 decoder. BOM handling is not needed because
+    // UTF-8 BOM bytes (0xEF 0xBB 0xBF) are all >= 0x80.
+    const len = bytes.length;
     if (len > 0 && !this._doNotFlush) {
       let allAscii = true;
       for (let i = 0; i < len; i++) {
@@ -427,7 +390,7 @@ export class TextDecoder {
       if (allAscii) {
         this._decoder = null;
         this._BOMseen = true;
-        return asciiToString(bytes, 0, len);
+        return String.fromCharCode.apply(null, bytes as unknown as number[]);
       }
     }
 
