@@ -20,8 +20,13 @@ internal final class FileSystemFileHandle: SharedRef<FileHandle> {
 
     // Cache the file size on open to avoid repeated seek-to-end operations.
     // This saves 3 syscalls per size access (offset, seekToEnd, seekBack).
-    cachedFileSize = try handle.seekToEnd()
-    handle.seek(toFileOffset: 0)
+    do {
+      cachedFileSize = try handle.seekToEnd()
+      handle.seek(toFileOffset: 0)
+    } catch {
+      cachedFileSize = 0
+      handle.seek(toFileOffset: 0)
+    }
 
     if mode == "wt" {
       try handle.truncate(atOffset: 0)

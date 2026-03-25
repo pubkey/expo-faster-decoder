@@ -125,10 +125,11 @@ class FileSystemFileHandle private constructor(
         bytesRead += result
       }
 
+      val backingArray = buffer.array()
       return if (bytesRead == readAmount) {
-        buffer.array()
+        backingArray
       } else {
-        buffer.array().copyOfRange(0, bytesRead)
+        backingArray.copyOfRange(0, bytesRead)
       }
     } catch (e: Exception) {
       throw UnableToReadHandleException(e.message ?: "unknown error")

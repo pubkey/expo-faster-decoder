@@ -171,7 +171,7 @@ function benchSizeReads(
 
   const start = performance.now();
   for (let i = 0; i < iterations; i++) {
-    const _size = handle.size; // With caching: 0 syscalls. Without: 3 syscalls (iOS) or 1 (Android)
+    const size = handle.size; // With caching: 0 syscalls. Without: 3 syscalls (iOS) or 1 (Android)
   }
   const totalMs = performance.now() - start;
   handle.close();
