@@ -4,31 +4,75 @@
 // https://github.com/inexorabletash/text-encoding/blob/3f330964c0e97e1ed344c2a3e963f4598610a7ad/lib/encoding.js#L1
 
 /**
- * Checks if a number is within a specified range.
- * @param a The number to test.
- * @param min The minimum value in the range, inclusive.
- * @param max The maximum value in the range, inclusive.
- * @returns `true` if a passed number is within the specified range.
+ * End-of-stream is a special token that signifies no more tokens
+ * are in the stream.
  */
-function inRange(a: number, min: number, max: number): boolean {
-  return min <= a && a <= max;
-}
+const END_OF_STREAM = -1;
+
+const FINISHED = -1;
 
 /**
- * Converts an array of code points to a string.
+ * Maximum number of char codes to pass to String.fromCharCode.apply at once.
+ */
+const STRING_CHUNK_SIZE = 8192;
+
+/**
+ * Converts an array of code points to a string using batched String.fromCharCode.
  * @param codePoints Array of code points.
  * @returns The string representation of given array.
  */
 function codePointsToString(codePoints: number[]): string {
-  let s = '';
-  for (let i = 0; i < codePoints.length; ++i) {
-    let cp = codePoints[i];
-    if (cp <= 0xffff) {
-      s += String.fromCharCode(cp);
-    } else {
-      cp -= 0x10000;
-      s += String.fromCharCode((cp >> 10) + 0xd800, (cp & 0x3ff) + 0xdc00);
+  const len = codePoints.length;
+  if (len === 0) return '';
+
+  // Fast path: small arrays where all code points are BMP (U+0000..U+FFFF)
+  if (len <= STRING_CHUNK_SIZE) {
+    let allBMP = true;
+    for (let i = 0; i < len; i++) {
+      if (codePoints[i] > 0xffff) {
+        allBMP = false;
+        break;
+      }
     }
+    if (allBMP) {
+      return String.fromCharCode.apply(null, codePoints);
+    }
+  }
+
+  // General path: handle supplementary plane characters with chunked conversion
+  let s = '';
+  const chunk: number[] = [];
+  for (let i = 0; i < len; i++) {
+    const cp = codePoints[i];
+    if (cp <= 0xffff) {
+      chunk.push(cp);
+    } else {
+      const adjusted = cp - 0x10000;
+      chunk.push((adjusted >> 10) + 0xd800, (adjusted & 0x3ff) + 0xdc00);
+    }
+    if (chunk.length >= STRING_CHUNK_SIZE) {
+      s += String.fromCharCode.apply(null, chunk);
+      chunk.length = 0;
+    }
+  }
+  if (chunk.length > 0) {
+    s += String.fromCharCode.apply(null, chunk);
+  }
+  return s;
+}
+
+/**
+ * Convert a range of bytes known to be ASCII (< 0x80) directly to a string.
+ */
+function asciiToString(bytes: Uint8Array, start: number, end: number): string {
+  const length = end - start;
+  if (length <= STRING_CHUNK_SIZE) {
+    return String.fromCharCode.apply(null, bytes.subarray(start, end) as unknown as number[]);
+  }
+  let s = '';
+  for (let i = start; i < end; i += STRING_CHUNK_SIZE) {
+    const chunkEnd = i + STRING_CHUNK_SIZE < end ? i + STRING_CHUNK_SIZE : end;
+    s += String.fromCharCode.apply(null, bytes.subarray(i, chunkEnd) as unknown as number[]);
   }
   return s;
 }
@@ -47,33 +91,30 @@ function normalizeBytes(input?: ArrayBuffer | DataView): Uint8Array {
 }
 
 /**
- * End-of-stream is a special token that signifies no more tokens
- * are in the stream.
- */
-const END_OF_STREAM = -1;
-
-const FINISHED = -1;
-
-/**
- * A stream represents an ordered sequence of tokens.
+ * An index-based stream that reads directly from a Uint8Array without
+ * copying or reversing. Supports prepend for the decoder's error recovery.
  *
  * @constructor
- * @param {!(number[]|Uint8Array)} tokens Array of tokens that provide the stream.
+ * @param {Uint8Array} data The byte array to read from.
  */
 class Stream {
-  private tokens: number[];
+  private data: Uint8Array;
+  private pos: number;
+  private prepended: number[] | null;
 
-  constructor(tokens: number[] | Uint8Array) {
-    this.tokens = Array.prototype.slice.call(tokens);
-    // Reversed as push/pop is more efficient than shift/unshift.
-    this.tokens.reverse();
+  constructor(data: Uint8Array) {
+    this.data = data;
+    this.pos = 0;
+    this.prepended = null;
   }
 
   /**
    * @return {boolean} True if end-of-stream has been hit.
    */
   endOfStream(): boolean {
-    return !this.tokens.length;
+    return (
+      (this.prepended === null || this.prepended.length === 0) && this.pos >= this.data.length
+    );
   }
 
   /**
@@ -85,8 +126,11 @@ class Stream {
    * end_of_stream.
    */
   read(): number {
-    if (!this.tokens.length) return END_OF_STREAM;
-    return this.tokens.pop()!;
+    if (this.prepended !== null && this.prepended.length > 0) {
+      return this.prepended.pop()!;
+    }
+    if (this.pos >= this.data.length) return END_OF_STREAM;
+    return this.data[this.pos++];
   }
 
   /**
@@ -97,25 +141,16 @@ class Stream {
    * @param token The token(s) to prepend to the stream.
    */
   prepend(token: number | number[]): void {
-    if (Array.isArray(token)) {
-      while (token.length) this.tokens.push(token.pop()!);
-    } else {
-      this.tokens.push(token);
+    if (this.prepended === null) {
+      this.prepended = [];
     }
-  }
-
-  /**
-   * When one or more tokens are pushed to a stream, those tokens
-   * must be inserted, in given order, after the last token in the
-   * stream.
-   *
-   * @param token The tokens(s) to push to the stream.
-   */
-  push(token: number | number[]): void {
     if (Array.isArray(token)) {
-      while (token.length) this.tokens.unshift(token.shift()!);
+      // Push in reverse order so pop() returns them in the original order
+      for (let i = token.length - 1; i >= 0; i--) {
+        this.prepended.push(token[i]);
+      }
     } else {
-      this.tokens.unshift(token);
+      this.prepended.push(token);
     }
   }
 }
@@ -210,14 +245,14 @@ class UTF8Decoder implements Decoder {
 
     // 3. If utf-8 bytes needed is 0, based on byte:
     if (this.utf8BytesNeeded === 0) {
-      // 0x00 to 0x7F
-      if (inRange(bite, 0x00, 0x7f)) {
+      // 0x00 to 0x7F — inline range check for performance
+      if (bite <= 0x7f) {
         // Return a code point whose value is byte.
         return bite;
       }
 
       // 0xC2 to 0xDF
-      else if (inRange(bite, 0xc2, 0xdf)) {
+      else if (bite >= 0xc2 && bite <= 0xdf) {
         // 1. Set utf-8 bytes needed to 1.
         this.utf8BytesNeeded = 1;
 
@@ -226,7 +261,7 @@ class UTF8Decoder implements Decoder {
       }
 
       // 0xE0 to 0xEF
-      else if (inRange(bite, 0xe0, 0xef)) {
+      else if (bite >= 0xe0 && bite <= 0xef) {
         // 1. If byte is 0xE0, set utf-8 lower boundary to 0xA0.
         if (bite === 0xe0) this.utf8LowerBoundary = 0xa0;
         // 2. If byte is 0xED, set utf-8 upper boundary to 0x9F.
@@ -238,7 +273,7 @@ class UTF8Decoder implements Decoder {
       }
 
       // 0xF0 to 0xF4
-      else if (inRange(bite, 0xf0, 0xf4)) {
+      else if (bite >= 0xf0 && bite <= 0xf4) {
         // 1. If byte is 0xF0, set utf-8 lower boundary to 0x90.
         if (bite === 0xf0) this.utf8LowerBoundary = 0x90;
         // 2. If byte is 0xF4, set utf-8 upper boundary to 0x8F.
@@ -261,7 +296,7 @@ class UTF8Decoder implements Decoder {
 
     // 4. If byte is not in the range utf-8 lower boundary to utf-8
     // upper boundary, inclusive, run these substeps:
-    if (!inRange(bite, this.utf8LowerBoundary, this.utf8UpperBoundary)) {
+    if (bite < this.utf8LowerBoundary || bite > this.utf8UpperBoundary) {
       // 1. Set utf-8 code point, utf-8 bytes needed, and utf-8
       // bytes seen to 0, set utf-8 lower boundary to 0x80, and set
       // utf-8 upper boundary to 0xBF.
@@ -375,6 +410,26 @@ export class TextDecoder {
     // 2. If options's stream is true, set the do not flush flag, and
     // unset the do not flush flag otherwise.
     this._doNotFlush = Boolean(options['stream']);
+
+    const len = bytes.length;
+
+    // Fast path: pure ASCII input in non-streaming mode.
+    // Pure ASCII bytes are all < 0x80 and cannot contain a UTF-8 BOM
+    // (which is encoded as 0xEF 0xBB 0xBF), so BOM handling is not needed.
+    if (len > 0 && !this._doNotFlush) {
+      let allAscii = true;
+      for (let i = 0; i < len; i++) {
+        if (bytes[i] >= 0x80) {
+          allAscii = false;
+          break;
+        }
+      }
+      if (allAscii) {
+        this._decoder = null;
+        this._BOMseen = true;
+        return asciiToString(bytes, 0, len);
+      }
+    }
 
     // 3. If input is given, push a copy of input to stream.
     // TODO: Align with spec algorithm - maintain stream on instance.
