@@ -53,7 +53,9 @@ export class FileSystemFile {
 
 export class FileSystemFileHandle {
   readBytes(bytes: number): any {}
+  readBytesAt(offset: number, bytes: number): any {}
   writeBytes(bytes: TypedArray): any {}
+  writeBytesAt(offset: number, bytes: TypedArray): any {}
   close(): any {}
 }
 

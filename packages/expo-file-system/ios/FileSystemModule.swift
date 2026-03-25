@@ -195,8 +195,8 @@ public final class FileSystemModule: Module {
         return try file.bytes()
       }
 
-      Function("open") { (file, _mode: String?) in
-        return try FileSystemFileHandle(file: file)
+      Function("open") { (file, mode: String?) in
+        return try FileSystemFileHandle(file: file, mode: mode)
       }
 
       Function("info") { (file: FileSystemFile, options: InfoOptions?) in
@@ -278,8 +278,16 @@ public final class FileSystemModule: Module {
         try fileHandle.read(bytes)
       }
 
+      Function("readBytesAt") { (fileHandle, offset: UInt64, bytes: Int) in
+        try fileHandle.readAt(offset, bytes)
+      }
+
       Function("writeBytes") { (fileHandle, bytes: Data) in
         try fileHandle.write(bytes)
+      }
+
+      Function("writeBytesAt") { (fileHandle, offset: UInt64, bytes: Data) in
+        try fileHandle.writeAt(offset, bytes)
       }
 
       Function("close") { fileHandle in

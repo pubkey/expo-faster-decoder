@@ -442,10 +442,26 @@ export declare class FileHandle {
    */
   readBytes(length: number): Uint8Array<ArrayBuffer>;
   /*
+   * Seeks to the specified offset and reads bytes in a single native call.
+   * This is more efficient than setting `offset` and then calling `readBytes` separately,
+   * as it requires only one JS-to-native bridge crossing instead of two.
+   * @param offset The byte offset to seek to before reading.
+   * @param length The number of bytes to read.
+   */
+  readBytesAt(offset: number, length: number): Uint8Array<ArrayBuffer>;
+  /*
    * Writes the specified bytes to the file at the current offset.
    * @param bytes A `Uint8Array` array containing bytes to write.
    */
   writeBytes(bytes: Uint8Array): void;
+  /*
+   * Seeks to the specified offset and writes bytes in a single native call.
+   * This is more efficient than setting `offset` and then calling `writeBytes` separately,
+   * as it requires only one JS-to-native bridge crossing instead of two.
+   * @param offset The byte offset to seek to before writing.
+   * @param bytes A `Uint8Array` array containing bytes to write.
+   */
+  writeBytesAt(offset: number, bytes: Uint8Array): void;
   /*
    * A property that indicates the current byte offset in the file. Calling `readBytes` or `writeBytes` will read or write a specified amount of bytes starting from this offset. The offset is incremented by the number of bytes read or written.
    * The offset can be set to any value within the file size. If the offset is set to a value greater than the file size, the next write operation will append data to the end of the file.

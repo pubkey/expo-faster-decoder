@@ -11,7 +11,6 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
-import kotlin.math.min
 
 enum class FileMode(val descriptor: String) : Record {
   /** Read-only */
@@ -87,6 +86,10 @@ class FileSystemFileHandle private constructor(
 
   private val fileChannel: FileChannel = ref
 
+  // Cache the file size to avoid repeated syscalls.
+  // Updated on writes so size reads are free.
+  private var cachedFileSize: Long = try { fileChannel.size() } catch (_: Exception) { 0L }
+
   private fun ensureIsOpen() {
     if (!fileChannel.isOpen) {
       throw UnableToReadHandleException("file handle is closed")
@@ -106,11 +109,10 @@ class FileSystemFileHandle private constructor(
     mode.ensureCanRead()
 
     try {
-      val currentPosition = fileChannel.position()
-      val totalSize = fileChannel.size()
-      val available = totalSize - currentPosition
-      val readAmount = min(length, available).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-
+      // Clamp the requested read length to a sane maximum without
+      // extra position()/size() syscalls. FileChannel.read() naturally
+      // returns fewer bytes (or -1) at EOF.
+      val readAmount = length.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
       if (readAmount <= 0) {
         return ByteArray(0)
       }
@@ -123,10 +125,19 @@ class FileSystemFileHandle private constructor(
         bytesRead += result
       }
 
-      return buffer.array()
+      return if (bytesRead == readAmount) {
+        buffer.array()
+      } else {
+        buffer.array().copyOfRange(0, bytesRead)
+      }
     } catch (e: Exception) {
       throw UnableToReadHandleException(e.message ?: "unknown error")
     }
+  }
+
+  fun readAt(readOffset: Long, length: Long): ByteArray {
+    fileChannel.position(readOffset)
+    return read(length)
   }
 
   fun write(data: ByteArray) {
@@ -134,13 +145,23 @@ class FileSystemFileHandle private constructor(
     mode.ensureCanWrite()
 
     try {
+      val positionBefore = fileChannel.position()
       val buffer = ByteBuffer.wrap(data)
       while (buffer.hasRemaining()) {
         fileChannel.write(buffer)
       }
+      val newPosition = positionBefore + data.size
+      if (newPosition > cachedFileSize) {
+        cachedFileSize = newPosition
+      }
     } catch (e: Exception) {
       throw UnableToWriteHandleException(e.message ?: "unknown error")
     }
+  }
+
+  fun writeAt(writeOffset: Long, data: ByteArray) {
+    fileChannel.position(writeOffset)
+    write(data)
   }
 
   var offset: Long?
@@ -158,10 +179,6 @@ class FileSystemFileHandle private constructor(
 
   val size: Long?
     get() {
-      return try {
-        fileChannel.size()
-      } catch (e: Exception) {
-        null
-      }
+      return if (fileChannel.isOpen) cachedFileSize else null
     }
 }
