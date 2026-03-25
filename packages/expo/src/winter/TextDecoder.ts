@@ -106,7 +106,7 @@ function isAllAscii(bytes: Uint8Array): boolean {
   return true;
 }
 
-function normalizeBytes(input?: ArrayBuffer | DataView): Uint8Array {
+function normalizeBytes(input?: ArrayBuffer | DataView | ArrayBufferView): Uint8Array {
   if (typeof input === 'object' && input instanceof ArrayBuffer) {
     return new Uint8Array(input);
   } else if (
@@ -424,7 +424,7 @@ export class TextDecoder {
     return this._ignoreBOM;
   }
 
-  decode(input?: ArrayBuffer | DataView, options: { stream?: boolean } = {}): string {
+  decode(input?: ArrayBuffer | DataView | ArrayBufferView, options: { stream?: boolean } = {}): string {
     const bytes = normalizeBytes(input);
     const isStreaming = Boolean(options['stream']);
 
