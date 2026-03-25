@@ -2,6 +2,31 @@
 // `TextEncoder` is in Hermes and we only need utf-8 decoder for React Server Components.
 //
 // https://github.com/inexorabletash/text-encoding/blob/3f330964c0e97e1ed344c2a3e963f4598610a7ad/lib/encoding.js#L1
+//
+// Performance optimizations:
+// - Index-based stream (no array copy/reverse)
+// - Chunked String.fromCharCode for fast string building
+// - Fast ASCII path for all-ASCII data
+// - Native module bindings for large arrays (iOS/Android)
+
+// Optional native module for high-performance UTF-8 decoding on large arrays
+let nativeTextDecoderModule: {
+  decodeUTF8: (data: Uint8Array, fatal: boolean) => string;
+} | null = null;
+
+try {
+  nativeTextDecoderModule =
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('expo-modules-core').requireOptionalNativeModule('ExpoTextDecoderModule');
+} catch {
+  // Native module not available (e.g. web, test environment)
+}
+
+// Threshold in bytes above which we prefer the native module for decoding
+const NATIVE_DECODE_THRESHOLD = 512;
+
+// Max args for String.fromCharCode.apply (conservative limit to avoid stack overflow)
+const FROM_CHAR_CODE_CHUNK_SIZE = 8192;
 
 /**
  * Checks if a number is within a specified range.
@@ -15,22 +40,70 @@ function inRange(a: number, min: number, max: number): boolean {
 }
 
 /**
- * Converts an array of code points to a string.
+ * Converts an array of code points to a string using chunked
+ * String.fromCharCode.apply for better performance than per-character concatenation.
  * @param codePoints Array of code points.
  * @returns The string representation of given array.
  */
 function codePointsToString(codePoints: number[]): string {
-  let s = '';
+  // First, expand supplementary code points into surrogate pairs
+  const charCodes: number[] = [];
   for (let i = 0; i < codePoints.length; ++i) {
-    let cp = codePoints[i];
+    const cp = codePoints[i];
     if (cp <= 0xffff) {
-      s += String.fromCharCode(cp);
+      charCodes.push(cp);
     } else {
-      cp -= 0x10000;
-      s += String.fromCharCode((cp >> 10) + 0xd800, (cp & 0x3ff) + 0xdc00);
+      const adjusted = cp - 0x10000;
+      charCodes.push((adjusted >> 10) + 0xd800, (adjusted & 0x3ff) + 0xdc00);
     }
   }
-  return s;
+
+  // Convert char codes to string in chunks to avoid call stack limits
+  if (charCodes.length <= FROM_CHAR_CODE_CHUNK_SIZE) {
+    return String.fromCharCode.apply(null, charCodes);
+  }
+  let result = '';
+  for (let i = 0; i < charCodes.length; i += FROM_CHAR_CODE_CHUNK_SIZE) {
+    result += String.fromCharCode.apply(
+      null,
+      charCodes.slice(i, i + FROM_CHAR_CODE_CHUNK_SIZE)
+    );
+  }
+  return result;
+}
+
+/**
+ * Fast conversion of a Uint8Array of ASCII bytes (all < 0x80) to a string.
+ */
+function asciiToString(bytes: Uint8Array): string {
+  if (bytes.length <= FROM_CHAR_CODE_CHUNK_SIZE) {
+    return String.fromCharCode.apply(null, bytes as unknown as number[]);
+  }
+  let result = '';
+  for (let i = 0; i < bytes.length; i += FROM_CHAR_CODE_CHUNK_SIZE) {
+    const end = Math.min(i + FROM_CHAR_CODE_CHUNK_SIZE, bytes.length);
+    result += String.fromCharCode.apply(null, bytes.subarray(i, end) as unknown as number[]);
+  }
+  return result;
+}
+
+/**
+ * Checks if every byte in the array is ASCII (< 0x80).
+ * Checks 4 bytes at a time for speed.
+ */
+function isAllAscii(bytes: Uint8Array): boolean {
+  const len = bytes.length;
+  let i = 0;
+  // Check 4 bytes at a time using bitwise OR
+  for (; i + 3 < len; i += 4) {
+    if ((bytes[i] | bytes[i + 1] | bytes[i + 2] | bytes[i + 3]) & 0x80) {
+      return false;
+    }
+  }
+  for (; i < len; i++) {
+    if (bytes[i] & 0x80) return false;
+  }
+  return true;
 }
 
 function normalizeBytes(input?: ArrayBuffer | DataView): Uint8Array {
@@ -55,67 +128,59 @@ const END_OF_STREAM = -1;
 const FINISHED = -1;
 
 /**
- * A stream represents an ordered sequence of tokens.
+ * An optimized stream using index-based access into a Uint8Array.
+ * Avoids the O(n) array copy and reverse of the original Stream class.
  *
- * @constructor
- * @param {!(number[]|Uint8Array)} tokens Array of tokens that provide the stream.
+ * The prepend() operation is implemented by decrementing the position,
+ * which works because prepend is only ever called with the byte that
+ * was just read (to reprocess it as a new sequence start on error).
  */
 class Stream {
-  private tokens: number[];
+  private tokens: Uint8Array;
+  private pos: number;
 
-  constructor(tokens: number[] | Uint8Array) {
-    this.tokens = Array.prototype.slice.call(tokens);
-    // Reversed as push/pop is more efficient than shift/unshift.
-    this.tokens.reverse();
+  constructor(tokens: Uint8Array) {
+    this.tokens = tokens;
+    this.pos = 0;
   }
 
   /**
    * @return {boolean} True if end-of-stream has been hit.
    */
   endOfStream(): boolean {
-    return !this.tokens.length;
+    return this.pos >= this.tokens.length;
   }
 
   /**
-   * When a token is read from a stream, the first token in the
-   * stream must be returned and subsequently removed, and
-   * end-of-stream must be returned otherwise.
-   *
-   * @return {number} Get the next token from the stream, or
-   * end_of_stream.
+   * @return {number} Get the next token from the stream, or end_of_stream.
    */
   read(): number {
-    if (!this.tokens.length) return END_OF_STREAM;
-    return this.tokens.pop()!;
+    if (this.pos >= this.tokens.length) return END_OF_STREAM;
+    return this.tokens[this.pos++];
   }
 
   /**
-   * When one or more tokens are prepended to a stream, those tokens
-   * must be inserted, in given order, before the first token in the
-   * stream.
+   * Prepend token(s) back to the stream by rewinding the position.
+   * This works because in the UTF-8 decoder, prepend is only called
+   * with bytes that were just read from the stream.
    *
    * @param token The token(s) to prepend to the stream.
    */
   prepend(token: number | number[]): void {
     if (Array.isArray(token)) {
-      while (token.length) this.tokens.push(token.pop()!);
+      this.pos -= token.length;
     } else {
-      this.tokens.push(token);
+      this.pos--;
     }
   }
 
   /**
-   * When one or more tokens are pushed to a stream, those tokens
-   * must be inserted, in given order, after the last token in the
-   * stream.
-   *
-   * @param token The tokens(s) to push to the stream.
+   * Advance past any contiguous ASCII bytes and return the count consumed.
+   * This allows the decode loop to skip the per-byte state machine for ASCII runs.
    */
-  push(token: number | number[]): void {
-    if (Array.isArray(token)) {
-      while (token.length) this.tokens.unshift(token.shift()!);
-    } else {
-      this.tokens.unshift(token);
+  skipAscii(output: number[]): void {
+    while (this.pos < this.tokens.length && this.tokens[this.pos] < 0x80) {
+      output.push(this.tokens[this.pos++]);
     }
   }
 }
@@ -361,6 +426,27 @@ export class TextDecoder {
 
   decode(input?: ArrayBuffer | DataView, options: { stream?: boolean } = {}): string {
     const bytes = normalizeBytes(input);
+    const isStreaming = Boolean(options['stream']);
+
+    // Non-streaming fast paths: avoid state machine overhead when possible
+    if (!isStreaming && !this._doNotFlush) {
+      // Fast path: try native module for large arrays
+      if (nativeTextDecoderModule && bytes.length >= NATIVE_DECODE_THRESHOLD) {
+        try {
+          const result = nativeTextDecoderModule.decodeUTF8(bytes, this.fatal);
+          return this.handleBOM(result);
+        } catch {
+          if (this.fatal) throw new TypeError('Decoder error');
+          // Native module reported an error in non-fatal mode, fall through to JS path
+        }
+      }
+
+      // Fast path: all-ASCII data (no multi-byte sequences, no BOM possible)
+      if (bytes.length > 0 && isAllAscii(bytes)) {
+        this._BOMseen = true;
+        return asciiToString(bytes);
+      }
+    }
 
     // 1. If the do not flush flag is unset, set decoder to a new
     // encoding's decoder, set stream to a new stream, and unset the
@@ -374,16 +460,18 @@ export class TextDecoder {
 
     // 2. If options's stream is true, set the do not flush flag, and
     // unset the do not flush flag otherwise.
-    this._doNotFlush = Boolean(options['stream']);
+    this._doNotFlush = isStreaming;
 
     // 3. If input is given, push a copy of input to stream.
-    // TODO: Align with spec algorithm - maintain stream on instance.
     const input_stream = new Stream(bytes);
 
     // 4. Let output be a new stream.
     const output: number[] = [];
 
     while (true) {
+      // Skip contiguous ASCII bytes in bulk (avoids per-byte handler calls)
+      input_stream.skipAscii(output);
+
       const token = input_stream.read();
 
       if (token === END_OF_STREAM) break;
@@ -409,6 +497,22 @@ export class TextDecoder {
     }
 
     return this.serializeStream(output);
+  }
+
+  /**
+   * Handle BOM stripping for strings returned by the native module.
+   */
+  private handleBOM(result: string): string {
+    if (this._encoding!.name === 'UTF-8') {
+      if (!this._ignoreBOM && !this._BOMseen && result.length > 0 && result.charCodeAt(0) === 0xfeff) {
+        this._BOMseen = true;
+        return result.slice(1);
+      }
+      if (result.length > 0) {
+        this._BOMseen = true;
+      }
+    }
+    return result;
   }
 
   // serializeStream method for converting code points to a string
